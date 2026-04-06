@@ -114,6 +114,7 @@ public class Jugador extends Thread {
                             return;
                         }
                     }
+
                 } else {
                     salida.println("INSUFICIENTE");
                     socket.close();
@@ -134,6 +135,76 @@ public class Jugador extends Thread {
 
                 if (accion == null) {
                     break;
+                }
+
+                partes = accion.split(":");
+
+                if (partes.length == 4) {
+                    if (partes[0].equals("sbsc")) {
+                        try (Connection conexion = conectar()) {
+                            PreparedStatement getIdUser = conexion.prepareStatement("SELECT id FROM usuarios WHERE username = ?");
+                            getIdUser.setString(1, partes[1]);
+                            ResultSet rs = getIdUser.executeQuery();
+                            if (rs.next()) {
+                                int id = rs.getInt("id");
+
+                                PreparedStatement getMaxScore = conexion.prepareStatement("SELECT max_score, level_max FROM estadisticas WHERE id = ?");
+                                getMaxScore.setInt(1, id);
+                                ResultSet rs2 = getMaxScore.executeQuery();
+
+                                if (rs2.next()) {
+                                    int puntuacion = rs2.getInt("max_score");
+                                    int level = rs2.getInt("level_max");
+
+                                    if (level < Integer.parseInt(partes[2])) {
+                                        PreparedStatement updateLevel = conexion.prepareStatement("UPDATE estadisticas SET level_max = ? WHERE id = ?");
+                                        updateLevel.setInt(1, Integer.parseInt(partes[2]));
+                                        updateLevel.setInt(2, id);
+                                        updateLevel.executeUpdate();
+                                        System.out.println("Nivel maximo actualizado");
+                                    }
+
+                                    if (puntuacion < Integer.parseInt(partes[3])) {
+                                        PreparedStatement updateScore = conexion.prepareStatement("UPDATE estadisticas SET max_score = ? WHERE id = ?");
+                                        updateScore.setInt(1, Integer.parseInt(partes[3]));
+                                        updateScore.setInt(2, id);
+                                        updateScore.executeUpdate();
+                                        System.out.println("Score maximo actualizado");
+                                    }
+
+                                } else {
+                                    PreparedStatement insertScore = conexion.prepareStatement("INSERT INTO estadisticas (id, username, level_max, max_score) VALUES (?, ?, ?, ?)");
+                                    insertScore.setInt(1, id);
+                                    insertScore.setString(2, partes[1]);
+                                    insertScore.setInt(3, Integer.parseInt(partes[2]));
+                                    insertScore.setInt(4, Integer.parseInt(partes[3]));
+                                    insertScore.executeUpdate();
+                                    System.out.println("El usuario ha registrado una puntuacion");
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (partes[0].equals("basc")) {
+                        try (Connection con = conectar();
+                             PreparedStatement checkBestScores = con.prepareStatement(
+                                     "SELECT username, max_score FROM estadisticas ORDER BY max_score DESC LIMIT 10")) {
+
+                            ResultSet rs = checkBestScores.executeQuery();
+                            StringBuilder respuesta = new StringBuilder("basc");
+
+                            while (rs.next()) {
+                                respuesta.append(":").append(rs.getString("username"))
+                                        .append(",").append(rs.getInt("max_score"));
+                            }
+
+                            salida.println(respuesta.toString());
+                            System.out.println("Enviando scoreboard a " + this.getName());
+
+                        } catch (SQLException e) {
+                            System.out.println("Error al obtener scoreboard: " + e.getMessage());
+                        }
+                    }
                 }
             }
 
