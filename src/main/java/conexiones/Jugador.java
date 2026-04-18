@@ -22,9 +22,10 @@ public class Jugador extends Thread {
     }
 
     public static Connection conectar() throws SQLException {
-        String url = "jdbc:postgresql://localhost:5433/user_password";
-        String usuario = "postgres";
-        String password = "root";
+        // Configuración para tu instancia EC2
+        String url = "jdbc:postgresql://localhost:5432/game_db";
+        String usuario = "tfg_user";
+        String password = "Clave_00";
 
         return DriverManager.getConnection(url, usuario, password);
     }
@@ -32,193 +33,126 @@ public class Jugador extends Thread {
     @Override
     public void run() {
         try {
-
             String mensaje = entrada.readLine();
-
-            if (mensaje == null) {
-                return;
-            }
+            if (mensaje == null) return;
 
             String[] partes = mensaje.split(":");
+            if (partes.length < 3) return;
 
             try (Connection conexion = conectar()) {
-                if (partes.length == 3) {
-                    if (partes[0].equals("l")) {
-                        PreparedStatement checkUser = conexion.prepareStatement("SELECT password_hash FROM usuarios WHERE username = ?");
-                        checkUser.setString(1, partes[1]);
-                        ResultSet rs = checkUser.executeQuery();
+                // --- LÓGICA DE LOGIN ---
+                if (partes[0].equals("l")) {
+                    // La base de datos comprueba el hash usando el Salt guardado automáticamente
+                    String sql = "SELECT id FROM usuarios WHERE username = ? AND password_hash = crypt(?, password_hash)";
+                    PreparedStatement checkUser = conexion.prepareStatement(sql);
+                    checkUser.setString(1, partes[1]);
+                    checkUser.setString(2, partes[2]);
+                    ResultSet rs = checkUser.executeQuery();
 
-                        if (rs.next()) {
-                            String dbPass = rs.getString("password_hash");
-                            if (partes.length == 3) {
-                                if (dbPass.equals(partes[2])) {
-                                    System.out.println("Intento de login - Usuario: " + partes[1] + " SI exitoso");
-                                    salida.println("ENTRAR");
-                                } else {
-                                    salida.println("INCORRECTO");
-                                    socket.close();
-                                    System.out.println("Intento de login - Usuario: " + partes[1] + " no exitoso");
-                                    return;
-                                }
-                            } else {
-                                salida.println("INSUFICIENTE");
-                                socket.close();
-                                System.out.println("Intento de login - Usuario: " + partes[1] + " no exitoso");
-                                return;
+                    if (rs.next()) {
+                        System.out.println("Login exitoso - Usuario: " + partes[1]);
+                        salida.println("ENTRAR");
+                    } else {
+                        System.out.println("Login fallido - Usuario: " + partes[1]);
+                        salida.println("INCORRECTO");
+                        socket.close();
+                        return;
+                    }
+                }
+
+                // --- LÓGICA DE REGISTRO ---
+                if (partes[0].equals("r")) {
+                    // 1. Comprobar si existe
+                    PreparedStatement checkExist = conexion.prepareStatement("SELECT id FROM usuarios WHERE username = ?");
+                    checkExist.setString(1, partes[1]);
+                    if (checkExist.executeQuery().next()) {
+                        salida.println("EXISTENTE");
+                        socket.close();
+                        return;
+                    }
+
+                    // 2. Insertar con gen_salt('bf') para máxima seguridad
+                    String sqlInsert = "INSERT INTO usuarios (username, password_hash) VALUES (?, crypt(?, gen_salt('bf'))) RETURNING id";
+                    PreparedStatement insertUser = conexion.prepareStatement(sqlInsert);
+                    insertUser.setString(1, partes[1]);
+                    insertUser.setString(2, partes[2]);
+                    ResultSet rsInsert = insertUser.executeQuery();
+
+                    if (rsInsert.next()) {
+                        int nuevoId = rsInsert.getInt("id");
+                        // Crear automáticamente la fila de estadísticas para este usuario
+                        PreparedStatement initStats = conexion.prepareStatement("INSERT INTO estadisticas (usuario_id) VALUES (?)");
+                        initStats.setInt(1, nuevoId);
+                        initStats.executeUpdate();
+
+                        System.out.println("Registro exitoso - Usuario: " + partes[1]);
+                        salida.println("ENTRAR");
+                    }
+                }
+
+                // --- BUCLE DE JUEGO (PUNTUACIONES) ---
+                while (true) {
+                    String accion = entrada.readLine();
+                    if (accion == null) break;
+
+                    partes = accion.split(":");
+
+                    // Subir puntuación (sbsc)
+                    if (partes[0].equals("sbsc") && partes.length == 4) {
+                        // Buscamos las estadísticas unidas al ID del usuario
+                        String sqlGet = "SELECT s.max_score, s.level_max, u.id FROM usuarios u " +
+                                "JOIN estadisticas s ON u.id = s.usuario_id WHERE u.username = ?";
+                        PreparedStatement psGet = conexion.prepareStatement(sqlGet);
+                        psGet.setString(1, partes[1]);
+                        ResultSet rsStats = psGet.executeQuery();
+
+                        if (rsStats.next()) {
+                            int uid = rsStats.getInt("id");
+                            int scoreDb = rsStats.getInt("max_score");
+                            int levelDb = rsStats.getInt("level_max");
+
+                            int newLevel = Integer.parseInt(partes[2]);
+                            int newScore = Integer.parseInt(partes[3]);
+
+                            if (newLevel > levelDb) {
+                                PreparedStatement upL = conexion.prepareStatement("UPDATE estadisticas SET level_max = ? WHERE usuario_id = ?");
+                                upL.setInt(1, newLevel);
+                                upL.setInt(2, uid);
+                                upL.executeUpdate();
                             }
-                        } else {
-                            salida.println("INEXISTENTE");
-                            socket.close();
-                            System.out.println("Intento de login - Usuario: " + partes[1] + " no exitoso");
-                            return;
+                            if (newScore > scoreDb) {
+                                PreparedStatement upS = conexion.prepareStatement("UPDATE estadisticas SET max_score = ? WHERE usuario_id = ?");
+                                upS.setInt(1, newScore);
+                                upS.setInt(2, uid);
+                                upS.executeUpdate();
+                            }
                         }
                     }
 
-                    if (partes[0].equals("r")) {
+                    // Obtener Ranking (basc)
+                    if (partes[0].equals("basc")) {
+                        String sqlRank = "SELECT u.username, s.max_score FROM usuarios u " +
+                                "JOIN estadisticas s ON u.id = s.usuario_id ORDER BY s.max_score DESC LIMIT 10";
+                        PreparedStatement psRank = conexion.prepareStatement(sqlRank);
+                        ResultSet rsRank = psRank.executeQuery();
 
-                        PreparedStatement checkUser = conexion.prepareStatement("SELECT password_hash FROM usuarios WHERE username = ?");
-                        checkUser.setString(1, partes[1]);
-                        ResultSet rs = checkUser.executeQuery();
-
-                        if (rs.next()) {
-                            salida.println("EXISTENTE");
-                            socket.close();
-                            System.out.println("Intento de registro - Usuario: " + partes[1] + " no exitoso, el usuario ya existe");
-                            return;
+                        StringBuilder sb = new StringBuilder("basc");
+                        while (rsRank.next()) {
+                            sb.append(":").append(rsRank.getString("username")).append(",").append(rsRank.getInt("max_score"));
                         }
-
-                        if (partes.length == 3) {
-                            PreparedStatement insertUser = conexion.prepareStatement("INSERT INTO usuarios (username, password_hash) VALUES (?, ?)");
-                            insertUser.setString(1, partes[1]);
-                            insertUser.setString(2, partes[2]);
-                            insertUser.executeUpdate();
-
-                            PreparedStatement checkInsert = conexion.prepareStatement("SELECT password_hash FROM usuarios WHERE username = ?");
-                            checkInsert.setString(1, partes[1]);
-                            ResultSet rs2 = checkInsert.executeQuery();
-
-                            if (rs2.next()) {
-                                String dbPass = rs2.getString("password_hash");
-
-                                if (dbPass.equals(partes[2])) {
-                                    System.out.println("Intento de registro - Usuario: " + partes[1] + " SI exitoso");
-                                    salida.println("ENTRAR");
-                                }
-
-                            }
-
-                        } else {
-                            salida.println("INSUFICIENTE");
-                            socket.close();
-                            System.out.println("Intento de registro - Usuario: " + partes[1] + " no exitoso");
-                            return;
-                        }
+                        salida.println(sb.toString());
                     }
-
-                } else {
-                    salida.println("INSUFICIENTE");
-                    socket.close();
-                    System.out.println("Intento de registro - Usuario: " + partes[1] + " no exitoso");
-                    return;
                 }
 
             } catch (SQLException ex) {
-                System.out.println("Error de base de datos: " + ex.getMessage());
+                System.out.println("Error SQL: " + ex.getMessage());
                 salida.println("ERROR_SERVIDOR");
-                return;
-            } catch (ArrayIndexOutOfBoundsException a) {
-                return;
-            }
-
-            while (true) {
-                String accion = entrada.readLine();
-
-                if (accion == null) {
-                    break;
-                }
-
-                partes = accion.split(":");
-
-                if (partes.length == 4) {
-                    if (partes[0].equals("sbsc")) {
-                        try (Connection conexion = conectar()) {
-                            PreparedStatement getIdUser = conexion.prepareStatement("SELECT id FROM usuarios WHERE username = ?");
-                            getIdUser.setString(1, partes[1]);
-                            ResultSet rs = getIdUser.executeQuery();
-                            if (rs.next()) {
-                                int id = rs.getInt("id");
-
-                                PreparedStatement getMaxScore = conexion.prepareStatement("SELECT max_score, level_max FROM estadisticas WHERE id = ?");
-                                getMaxScore.setInt(1, id);
-                                ResultSet rs2 = getMaxScore.executeQuery();
-
-                                if (rs2.next()) {
-                                    int puntuacion = rs2.getInt("max_score");
-                                    int level = rs2.getInt("level_max");
-
-                                    if (level < Integer.parseInt(partes[2])) {
-                                        PreparedStatement updateLevel = conexion.prepareStatement("UPDATE estadisticas SET level_max = ? WHERE id = ?");
-                                        updateLevel.setInt(1, Integer.parseInt(partes[2]));
-                                        updateLevel.setInt(2, id);
-                                        updateLevel.executeUpdate();
-                                        System.out.println("Nivel maximo actualizado");
-                                    }
-
-                                    if (puntuacion < Integer.parseInt(partes[3])) {
-                                        PreparedStatement updateScore = conexion.prepareStatement("UPDATE estadisticas SET max_score = ? WHERE id = ?");
-                                        updateScore.setInt(1, Integer.parseInt(partes[3]));
-                                        updateScore.setInt(2, id);
-                                        updateScore.executeUpdate();
-                                        System.out.println("Score maximo actualizado");
-                                    }
-
-                                } else {
-                                    PreparedStatement insertScore = conexion.prepareStatement("INSERT INTO estadisticas (id, username, level_max, max_score) VALUES (?, ?, ?, ?)");
-                                    insertScore.setInt(1, id);
-                                    insertScore.setString(2, partes[1]);
-                                    insertScore.setInt(3, Integer.parseInt(partes[2]));
-                                    insertScore.setInt(4, Integer.parseInt(partes[3]));
-                                    insertScore.executeUpdate();
-                                    System.out.println("El usuario ha registrado una puntuacion");
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    if (partes[0].equals("basc")) {
-                        try (Connection con = conectar();
-                             PreparedStatement checkBestScores = con.prepareStatement(
-                                     "SELECT username, max_score FROM estadisticas ORDER BY max_score DESC LIMIT 10")) {
-
-                            ResultSet rs = checkBestScores.executeQuery();
-                            StringBuilder respuesta = new StringBuilder("basc");
-
-                            while (rs.next()) {
-                                respuesta.append(":").append(rs.getString("username"))
-                                        .append(",").append(rs.getInt("max_score"));
-                            }
-
-                            salida.println(respuesta.toString());
-                            System.out.println("Enviando scoreboard a " + this.getName());
-
-                        } catch (SQLException e) {
-                            System.out.println("Error al obtener scoreboard: " + e.getMessage());
-                        }
-                    }
-                }
             }
 
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            e.printStackTrace();
         } finally {
-            try {
-                socket.close();
-                System.out.println("Se ha finalizado la conexion");
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            System.out.println("Jugador desconectado");
+            try { socket.close(); } catch (IOException e) { e.printStackTrace(); }
         }
     }
-
 }
