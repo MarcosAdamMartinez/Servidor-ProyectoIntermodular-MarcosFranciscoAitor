@@ -207,6 +207,21 @@ public class Jugador extends Thread {
                         }
                     }
 
+                    // Obtener score propio (obsc)
+                    if (partes[0].equals("obsc") && partes.length == 2) {
+                        String obscUser = partes[1].trim();
+                        String sqlObsc = "SELECT s.max_score FROM usuarios u " +
+                                "JOIN estadisticas s ON u.id = s.usuario_id WHERE u.username = ?";
+                        PreparedStatement psObsc = conexion.prepareStatement(sqlObsc);
+                        psObsc.setString(1, obscUser);
+                        ResultSet rsObsc = psObsc.executeQuery();
+                        if (rsObsc.next()) {
+                            salida.println("obsc:" + rsObsc.getInt("max_score"));
+                        } else {
+                            salida.println("obsc:0");
+                        }
+                    }
+
                     // Obtener Ranking (basc)
                     if (partes[0].equals("basc")) {
                         String sqlRank = "SELECT u.username, s.max_score FROM usuarios u " +
